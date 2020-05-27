@@ -1,23 +1,38 @@
-const http = require('https');
 const fs = require('fs');
-const { lint } = require('../fl/packages/adoc-lint/dist/index.js');
+const client = require('../github-client');
 
-const modified = JSON.parse(
-  fs.readFileSync(`${process.env.HOME}/files_modified.json`).toString()
-);
-const added = JSON.parse(
-  fs.readFileSync(`${process.env.HOME}/files_added.json`).toString()
-);
+const { HOME, GITHUB_SHA, GITHUB_REPOSITORY, GITHUB_WORKSPACE } = process.env;
 
-const checkFiles = modified.concat(added).filter((f) => f.endsWith('.adoc'));
-console.log({ checkFiles });
+const COMPILED_LINT_MODULE_PATH = `${GITHUB_WORKSPACE}/fl/packages/adoc-lint/dist/index.js`;
+const { lint } = require(COMPILED_LINT_MODULE_PATH);
+
+const modified = JSON.parse(fileContents(`${HOME}/files_modified.json`));
+const added = JSON.parse(fileContents(`${HOME}/files_added.json`));
+const filesToLint = modified.concat(added).filter((f) => f.endsWith('.adoc'));
 
 let annotations = [];
-checkFiles.forEach((path) => {
-  const lints = lint(fs.readFileSync(path).toString());
-  console.log(lints);
+filesToLint.forEach((path) => {
+  const lints = lint(fileContents(path));
   annotations = annotations.concat(lints.map((l) => toAnnotation(l, path)));
 });
+
+const json = {
+  name: 'lint-adoc',
+  head_sha: GITHUB_SHA,
+  status: 'completed',
+  conclusion: 'success',
+};
+
+if (annotations.length) {
+  json.conclusion = 'failure';
+  json.output = {
+    title: 'Asciidoc lint failure',
+    summary: `Found ${annotations.length} problems`,
+    annotations,
+  };
+}
+
+client.postJson(`/repos/${GITHUB_REPOSITORY}/check-runs`, json);
 
 function toAnnotation(result, path) {
   const annotation = {
@@ -34,51 +49,15 @@ function toAnnotation(result, path) {
   }
 
   if (result.recommendation) {
-    annotation.message += `\n\nRecommended fix:\n\n\`\`\`\n${result.recommendation}\n\`\`\``;
+    const reco = result.recommendation.startsWith('-->')
+      ? result.recommendation
+      : `\`\`\`\n${result.recommendation}\n\`\`\``;
+    annotation.message += `\n\nRecommended fix:\n\n${reco}`;
   }
 
   return annotation;
 }
 
-console.log({ token: process.env.GITHUB_TOKEN });
-
-// GITHUB_REPOSITORY
-let body = JSON.stringify({
-  name: 'lint-adoc',
-  head_sha: process.env.GITHUB_SHA,
-  status: 'completed',
-  conclusion: 'failure',
-  output: {
-    title: 'Asciidoc lint failure',
-    summary: `Found ${annotations.length} problems`,
-    annotations,
-  },
-});
-
-console.log(JSON.parse(body));
-
-let options = {
-  hostname: 'api.github.com',
-  path: `/repos/${process.env.GITHUB_REPOSITORY}/check-runs`,
-  method: 'POST',
-  headers: {
-    Authorization: `token ${process.env.GITHUB_TOKEN}`,
-    Accept: 'application/vnd.github.antiope-preview+json',
-    'User-Agent': '@friends-library lint action',
-    'Content-Type': 'application/json',
-    'Content-Length': Buffer.byteLength(body),
-  },
-};
-
-http
-  .request(options, (res) => {
-    let data = '';
-    res.on('data', (d) => {
-      data += d;
-    });
-    res.on('end', () => {
-      console.log(data);
-    });
-  })
-  .on('error', console.error)
-  .end(body);
+function fileContents(path) {
+  return fs.readFileSync(path).toString();
+}
